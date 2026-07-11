@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from .const import (
     PKCE_EXPIRY_SECONDS,
     PRIVATE_ACCOUNT_CAMERA_ACCEPTS,
     PRIVATE_ACCOUNT_CAMERA_ENDPOINT,
-    PRIVATE_API_HOST,
+    PRIVATE_API_HOSTS,
     PRIVATE_CLIENT_ID,
     PRIVATE_PROBE_STORE_KEY,
     PRIVATE_PROBE_STORE_VERSION,
@@ -30,6 +31,8 @@ from .const import (
     PRIVATE_TOKEN_STORE_VERSION,
     PROBE_ROUTE_DEFINITIONS,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class PrivateApiError(RuntimeError):
@@ -249,6 +252,13 @@ class AsyncMobilePrivateApi:
     def __init__(self, auth: MobilePrivateAuth, websession: ClientSession) -> None:
         self._auth = auth
         self._websession = websession
+        # Resolved during oven discovery; defaults to the first regional host.
+        self._host = PRIVATE_API_HOSTS[0]
+
+    @property
+    def host(self) -> str:
+        """Return the currently selected regional API host."""
+        return self._host
 
     @property
     def is_configured(self) -> bool:
@@ -278,40 +288,83 @@ class AsyncMobilePrivateApi:
         headers["Authorization"] = f"Bearer {token}"
         return await self._websession.request(
             method,
-            f"{PRIVATE_API_HOST}{endpoint}",
+            f"{self._host}{endpoint}",
             headers=headers,
             **kwargs,
         )
 
     async def async_list_ovens(self) -> list[OvenInfo]:
-        """Discover ovens from the account camera endpoint."""
+        """Discover ovens from the account camera endpoint.
+
+        Home Connect binds each account to one regional host, so probe the
+        candidate hosts in order and lock onto the one that returns the
+        account's appliances.
+        """
         last_error: Exception | None = None
-        for accept in PRIVATE_ACCOUNT_CAMERA_ACCEPTS:
-            try:
-                response = await self.async_request(
-                    "GET",
-                    PRIVATE_ACCOUNT_CAMERA_ENDPOINT,
-                    headers={"Accept": accept},
-                )
-                response.raise_for_status()
-                payload = await response.json()
-                response.close()
-                ovens: list[OvenInfo] = []
-                for item in payload.get("data") or []:
-                    private_ha_id = str(item.get("haId") or "")
-                    if not private_ha_id:
-                        continue
-                    ovens.append(
-                        OvenInfo(
-                            private_ha_id=private_ha_id,
-                            public_ha_id=f"{private_ha_id}-001",
-                            name=f"Home Connect Oven {private_ha_id[-6:]}",
-                        )
+        empty_host: str | None = None
+        for host in PRIVATE_API_HOSTS:
+            self._host = host
+            for accept in PRIVATE_ACCOUNT_CAMERA_ACCEPTS:
+                try:
+                    response = await self.async_request(
+                        "GET",
+                        PRIVATE_ACCOUNT_CAMERA_ENDPOINT,
+                        headers={"Accept": accept},
                     )
-                return ovens
-            except Exception as err:  # noqa: BLE001
-                last_error = err
-        raise PrivateApiError("Unable to discover ovens from account/camera.") from last_error
+                    response.raise_for_status()
+                    payload = await response.json()
+                    response.close()
+                    ovens = self._parse_ovens(payload)
+                    if ovens:
+                        _LOGGER.debug(
+                            "Discovered %d oven(s) on host %s", len(ovens), host
+                        )
+                        return ovens
+                    # Host answered but reported no camera oven; remember it as a
+                    # fallback and keep probing other regions.
+                    if empty_host is None:
+                        empty_host = host
+                    _LOGGER.debug(
+                        "Host %s responded but listed no camera ovens", host
+                    )
+                except Exception as err:  # noqa: BLE001
+                    last_error = err
+                    _LOGGER.debug(
+                        "Oven discovery failed on host %s (Accept %s): %s",
+                        host,
+                        accept,
+                        err,
+                    )
+
+        if empty_host is not None:
+            self._host = empty_host
+            raise PrivateApiError(
+                "Connected to Home Connect but no camera-equipped oven was found "
+                "on this account."
+            )
+
+        self._host = PRIVATE_API_HOSTS[0]
+        raise PrivateApiError(
+            f"Unable to discover ovens from account/camera. "
+            f"Last error: {last_error!r}"
+        ) from last_error
+
+    @staticmethod
+    def _parse_ovens(payload: dict[str, Any]) -> list[OvenInfo]:
+        """Turn an account/camera payload into OvenInfo objects."""
+        ovens: list[OvenInfo] = []
+        for item in payload.get("data") or []:
+            private_ha_id = str(item.get("haId") or "")
+            if not private_ha_id:
+                continue
+            ovens.append(
+                OvenInfo(
+                    private_ha_id=private_ha_id,
+                    public_ha_id=f"{private_ha_id}-001",
+                    name=f"Home Connect Oven {private_ha_id[-6:]}",
+                )
+            )
+        return ovens
 
     async def async_get_latest_snapshot(self, private_ha_id: str) -> SnapshotMedia | None:
         """Return the latest still snapshot metadata for an oven."""

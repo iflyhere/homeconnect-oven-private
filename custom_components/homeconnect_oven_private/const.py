@@ -16,7 +16,16 @@ PLATFORMS = [
 ]
 
 OAUTH_BASE = "https://api.home-connect.com"
-PRIVATE_API_HOST = "https://na.services.home-connect.com"
+# Home Connect serves appliance data from regional hosts. Accounts are bound to
+# one region, so discovery probes these in order and locks onto the one that
+# actually returns the account's appliances. EU is tried first because that is
+# where most Bosch/Siemens accounts live.
+PRIVATE_API_HOSTS = (
+    "https://eu.services.home-connect.com",
+    "https://na.services.home-connect.com",
+)
+# Kept for backwards compatibility / default before discovery has run.
+PRIVATE_API_HOST = PRIVATE_API_HOSTS[0]
 ENDPOINT_AUTHORIZE = "/security/oauth/authorize"
 ENDPOINT_TOKEN = "/security/oauth/token"
 PRIVATE_CLIENT_ID = "9B75AC9EC512F36C84256AC47D813E2C1DD0D6520DF774B020E1E6E2EB29B1F3"
