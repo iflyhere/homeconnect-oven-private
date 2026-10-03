@@ -22,7 +22,14 @@ PLATFORMS = [
 ]
 
 OAUTH_BASE = "https://api.home-connect.com"
-PRIVATE_API_HOST = "https://na.services.home-connect.com"
+# Account routes such as the notification center only answer on the host of the
+# account's region (an EU token gets 403 from NA); the access token names that
+# region. Appliance media answers on either host.
+PRIVATE_API_HOSTS = {
+    "EU": "https://eu.services.home-connect.com",
+    "NA": "https://na.services.home-connect.com",
+}
+PRIVATE_API_HOST = PRIVATE_API_HOSTS["NA"]
 ENDPOINT_AUTHORIZE = "/security/oauth/authorize"
 ENDPOINT_TOKEN = "/security/oauth/token"
 PRIVATE_CLIENT_ID = "9B75AC9EC512F36C84256AC47D813E2C1DD0D6520DF774B020E1E6E2EB29B1F3"

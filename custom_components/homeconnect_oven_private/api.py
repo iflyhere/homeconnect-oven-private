@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from .const import (
     PRIVATE_APPLIANCE_LIST_ACCEPT,
     PRIVATE_APPLIANCE_LIST_ENDPOINT,
     PRIVATE_API_HOST,
+    PRIVATE_API_HOSTS,
     PRIVATE_CLIENT_ID,
     PRIVATE_PROBE_STORE_KEY,
     PRIVATE_PROBE_STORE_VERSION,
@@ -148,6 +150,12 @@ class MobilePrivateAuth:
         token = self._data.get("token") or {}
         return bool(token.get("refresh_token"))
 
+    @property
+    def private_api_host(self) -> str:
+        """Return the private API host of the account's region."""
+        token = self._data.get("token") or {}
+        return _private_api_host_for_token(token.get("access_token"))
+
     def debug_state(self) -> dict[str, Any]:
         """Return a redacted auth state for diagnostics."""
         token = self._data.get("token") or {}
@@ -156,6 +164,7 @@ class MobilePrivateAuth:
             "has_access_token": bool(token.get("access_token")),
             "has_refresh_token": bool(token.get("refresh_token")),
             "expires_at": token.get("expires_at"),
+            "private_api_host": self.private_api_host,
             "has_pending_pkce": bool(pkce.get("state")),
             "pending_pkce_created_at": pkce.get("created_at"),
         }
@@ -318,17 +327,17 @@ class AsyncMobilePrivateApi:
         method: str,
         endpoint: str,
         *,
-        base_url: str = PRIVATE_API_HOST,
+        base_url: str | None = None,
         **kwargs: Any,
     ) -> ClientResponse:
-        """Make an authenticated request to the private API host."""
+        """Make an authenticated request, by default to the regional private host."""
         token = await self._auth.async_get_access_token()
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"Bearer {token}"
         headers.setdefault("User-Agent", "HomeConnect-appStoreNA/12.15.0")
         return await self._websession.request(
             method,
-            f"{base_url}{endpoint}",
+            f"{base_url or self._auth.private_api_host}{endpoint}",
             headers=headers,
             **kwargs,
         )
@@ -505,7 +514,7 @@ class AsyncMobilePrivateApi:
         ha_ids = [ha_id for ha_id in (public_ha_id, private_ha_id) if ha_id]
         attempts: list[dict[str, Any]] = []
 
-        for base_url in (OAUTH_BASE, PRIVATE_API_HOST):
+        for base_url in (OAUTH_BASE, self._auth.private_api_host):
             for ha_id in dict.fromkeys(ha_ids):
                 endpoint = f"/api/homeappliances/{ha_id}/commands/{command_key}"
                 response = await self.async_request(
@@ -721,6 +730,17 @@ def _normalize_token_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "expires_in" in payload:
         normalized["expires_at"] = fetched_at + int(payload["expires_in"])
     return normalized
+
+
+def _private_api_host_for_token(access_token: str | None) -> str:
+    """Pick the private host from the JWT's region claim, NA when unknown."""
+    try:
+        claims = access_token.split(".")[1]
+        claims += "=" * (-len(claims) % 4)
+        region = json.loads(base64.urlsafe_b64decode(claims))["region"]
+        return PRIVATE_API_HOSTS[str(region).upper()]
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return PRIVATE_API_HOST
 
 
 def _metadata_list_to_dict(metadata: list[dict[str, Any]]) -> dict[str, Any]:
